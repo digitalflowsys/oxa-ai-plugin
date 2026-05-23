@@ -1,0 +1,45 @@
+.oxa-admin h1 { margin-bottom: 0.5em; }
+.oxa-admin .oxa-card-form { background: #fff; border: 1px solid #dcdcde; border-radius: 8px; padding: 1.25rem 1.5rem; max-width: 800px; }
+
+.oxa-pill {
+  display: inline-block;
+  background: #f0f0f1;
+  border-radius: 9999px;
+  padding: 1px 8px;
+  font-size: 12px;
+  color: #50575e;
+  margin-left: 6px;
+}
+
+/* Prompt page */
+.oxa-prompt { max-width: 900px; }
+.oxa-prompt textarea {
+  width: 100%; padding: 0.6rem 0.75rem;
+  border-radius: 6px; border: 1px solid #dcdcde;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+}
+.oxa-prompt__row { display: flex; gap: 0.75rem; align-items: end; margin: 0.75rem 0; flex-wrap: wrap; }
+.oxa-status { margin: 0.5rem 0; color: #50575e; }
+.oxa-output {
+  background: #1d2327; color: #e6e6e6; padding: 1rem; border-radius: 6px;
+  max-height: 540px; overflow: auto;
+  white-space: pre-wrap; word-break: break-word;
+}
+
+/* Components */
+.oxa-components { display: grid; gap: 0.5rem; max-width: 1000px; }
+.oxa-component { background: #fff; border: 1px solid #dcdcde; border-radius: 6px; padding: 0.6rem 0.9rem; }
+.oxa-component summary { cursor: pointer; }
+.oxa-component__desc { display: block; color: #50575e; font-weight: normal; margin-top: 0.25rem; }
+.oxa-component pre {
+  background: #f6f7f7; padding: 0.75rem; border-radius: 6px;
+  max-height: 360px; overflow: auto;
+  font-size: 12px;
+}
+
+/* Logs */
+.oxa-logs td pre { font-size: 11px; max-height: 160px; overflow: auto; margin: 0; }
+.oxa-log--error td:nth-child(2) code { background: #fdecec; color: #c00; }
+.oxa-log--warn  td:nth-child(2) code { background: #fff8e5; color: #8a5b00; }
+.oxa-log--info  td:nth-child(2) code { background: #e8f0fe; color: #1d4ed8; }
