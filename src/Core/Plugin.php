@@ -21,19 +21,53 @@ use OxaAi\Mcp\Auth\BearerAuth;
 use OxaAi\Mcp\McpServer;
 use OxaAi\Mcp\ToolRegistry;
 use OxaAi\Mcp\Tools\AddSectionTool;
+use OxaAi\Mcp\Tools\BlockScaffoldTool;
+use OxaAi\Mcp\Tools\CacheFlushTool;
 use OxaAi\Mcp\Tools\ComposePageTool;
 use OxaAi\Mcp\Tools\CreateComponentTool;
 use OxaAi\Mcp\Tools\CreatePageTool;
+use OxaAi\Mcp\Tools\DbExecuteTool;
+use OxaAi\Mcp\Tools\DbQueryTool;
 use OxaAi\Mcp\Tools\DeleteSectionTool;
+use OxaAi\Mcp\Tools\ErrorLogClearTool;
+use OxaAi\Mcp\Tools\ErrorLogTailTool;
 use OxaAi\Mcp\Tools\GeneratePageTool;
 use OxaAi\Mcp\Tools\GetComponentSchemaTool;
 use OxaAi\Mcp\Tools\GetComponentSourceTool;
 use OxaAi\Mcp\Tools\GetPageTool;
+use OxaAi\Mcp\Tools\GlobalsGetTool;
+use OxaAi\Mcp\Tools\GlobalsUpdateTool;
 use OxaAi\Mcp\Tools\ListComponentsTool;
 use OxaAi\Mcp\Tools\ListPagesTool;
+use OxaAi\Mcp\Tools\MediaDeleteTool;
+use OxaAi\Mcp\Tools\MediaListTool;
+use OxaAi\Mcp\Tools\MediaUploadTool;
+use OxaAi\Mcp\Tools\PluginActivateTool;
+use OxaAi\Mcp\Tools\PluginDeactivateTool;
+use OxaAi\Mcp\Tools\PluginInstallFromUrlTool;
+use OxaAi\Mcp\Tools\PluginInstallTool;
+use OxaAi\Mcp\Tools\PluginUninstallTool;
+use OxaAi\Mcp\Tools\PluginsListTool;
+use OxaAi\Mcp\Tools\RewriteFlushTool;
 use OxaAi\Mcp\Tools\SetBrandTool;
+use OxaAi\Mcp\Tools\SiteStatusTool;
+use OxaAi\Mcp\Tools\ThemeDirCreateTool;
+use OxaAi\Mcp\Tools\ThemeDirDeleteTool;
+use OxaAi\Mcp\Tools\ThemeDirListTool;
+use OxaAi\Mcp\Tools\ThemeFileDeleteTool;
+use OxaAi\Mcp\Tools\ThemeFileReadTool;
+use OxaAi\Mcp\Tools\ThemeFileWriteTool;
+use OxaAi\Mcp\Tools\ThemeGitCommitTool;
+use OxaAi\Mcp\Tools\ThemeGitDiffTool;
+use OxaAi\Mcp\Tools\ThemeGitLogTool;
+use OxaAi\Mcp\Tools\ThemeGitRevertTool;
+use OxaAi\Mcp\Tools\ThemeGitStatusTool;
+use OxaAi\Mcp\Tools\TokensGetTool;
+use OxaAi\Mcp\Tools\TokensUpdateTool;
+use OxaAi\Mcp\Tools\TransientsDeleteTool;
 use OxaAi\Mcp\Tools\UpdateComponentTool;
 use OxaAi\Mcp\Tools\UpdateSectionTool;
+use OxaAi\Mcp\Tools\WpCliTool;
 use OxaAi\Providers\ClaudeProvider;
 use OxaAi\Providers\MockProvider;
 use OxaAi\Providers\OpenAIProvider;
@@ -45,6 +79,16 @@ use OxaAi\Rendering\PageWriter;
 use OxaAi\Rest\RestController;
 use OxaAi\Schema\SchemaRegistry;
 use OxaAi\Schema\SchemaValidator;
+use OxaAi\Site\BlockScaffolder;
+use OxaAi\Site\DbGate;
+use OxaAi\Site\Globals;
+use OxaAi\Site\MediaService;
+use OxaAi\Site\PluginService;
+use OxaAi\Site\SiteStatus;
+use OxaAi\Site\ThemeFs;
+use OxaAi\Site\ThemeGit;
+use OxaAi\Site\Tokens;
+use OxaAi\Site\WpCliRunner;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -155,6 +199,18 @@ final class Plugin
             $c->get(\OxaAi\Core\Logger::class)
         ));
 
+        // -------- Site services (filesystem, git, globals, media, plugins, db, wp-cli) --------
+        $c->set(ThemeFs::class,         static fn(Container $c): object => new ThemeFs($c->get(Logger::class)));
+        $c->set(ThemeGit::class,        static fn(Container $c): object => new ThemeGit($c->get(Logger::class)));
+        $c->set(Globals::class,         static fn(): object => new Globals());
+        $c->set(Tokens::class,          static fn(): object => new Tokens());
+        $c->set(SiteStatus::class,      static fn(): object => new SiteStatus());
+        $c->set(MediaService::class,    static fn(Container $c): object => new MediaService($c->get(Logger::class)));
+        $c->set(PluginService::class,   static fn(Container $c): object => new PluginService($c->get(Logger::class)));
+        $c->set(WpCliRunner::class,     static fn(Container $c): object => new WpCliRunner($c->get(Logger::class)));
+        $c->set(DbGate::class,          static fn(Container $c): object => new DbGate($c->get(Logger::class)));
+        $c->set(BlockScaffolder::class, static fn(Container $c): object => new BlockScaffolder($c->get(Logger::class)));
+
         $c->set(ToolRegistry::class, static function (Container $c): object {
             $registry = new ToolRegistry();
 
@@ -193,6 +249,58 @@ final class Plugin
                 $c->get(LayoutReader::class),
                 $c->get(PageWriter::class),
             ));
+
+            // 5. Site status & globals.
+            $registry->add(new SiteStatusTool($c->get(SiteStatus::class)));
+            $registry->add(new GlobalsGetTool($c->get(Globals::class)));
+            $registry->add(new GlobalsUpdateTool($c->get(Globals::class)));
+            $registry->add(new TokensGetTool($c->get(Tokens::class)));
+            $registry->add(new TokensUpdateTool($c->get(Tokens::class)));
+
+            // 6. Theme file operations.
+            $registry->add(new ThemeFileReadTool($c->get(ThemeFs::class)));
+            $registry->add(new ThemeFileWriteTool($c->get(ThemeFs::class)));
+            $registry->add(new ThemeFileDeleteTool($c->get(ThemeFs::class)));
+            $registry->add(new ThemeDirListTool($c->get(ThemeFs::class)));
+            $registry->add(new ThemeDirCreateTool($c->get(ThemeFs::class)));
+            $registry->add(new ThemeDirDeleteTool($c->get(ThemeFs::class)));
+
+            // 7. Theme git.
+            $registry->add(new ThemeGitStatusTool($c->get(ThemeGit::class)));
+            $registry->add(new ThemeGitDiffTool($c->get(ThemeGit::class)));
+            $registry->add(new ThemeGitLogTool($c->get(ThemeGit::class)));
+            $registry->add(new ThemeGitCommitTool($c->get(ThemeGit::class)));
+            $registry->add(new ThemeGitRevertTool($c->get(ThemeGit::class)));
+
+            // 8. Block scaffolding.
+            $registry->add(new BlockScaffoldTool($c->get(BlockScaffolder::class)));
+
+            // 9. Media library.
+            $registry->add(new MediaUploadTool($c->get(MediaService::class)));
+            $registry->add(new MediaListTool($c->get(MediaService::class)));
+            $registry->add(new MediaDeleteTool($c->get(MediaService::class)));
+
+            // 10. Plugins.
+            $registry->add(new PluginsListTool($c->get(PluginService::class)));
+            $registry->add(new PluginActivateTool($c->get(PluginService::class)));
+            $registry->add(new PluginDeactivateTool($c->get(PluginService::class)));
+            $registry->add(new PluginInstallTool($c->get(PluginService::class)));
+            $registry->add(new PluginInstallFromUrlTool($c->get(PluginService::class)));
+            $registry->add(new PluginUninstallTool($c->get(PluginService::class)));
+
+            // 11. Cache & debugging.
+            $registry->add(new CacheFlushTool());
+            $registry->add(new RewriteFlushTool());
+            $registry->add(new TransientsDeleteTool());
+            $registry->add(new ErrorLogTailTool());
+            $registry->add(new ErrorLogClearTool());
+
+            // 12. DB.
+            $registry->add(new DbQueryTool($c->get(DbGate::class)));
+            $registry->add(new DbExecuteTool($c->get(DbGate::class)));
+
+            // 13. WP-CLI.
+            $registry->add(new WpCliTool($c->get(WpCliRunner::class)));
 
             do_action('oxa_ai_register_mcp_tools', $registry, $c);
 
