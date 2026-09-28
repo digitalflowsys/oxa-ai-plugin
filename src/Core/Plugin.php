@@ -50,6 +50,7 @@ use OxaAi\Mcp\Tools\PluginUninstallTool;
 use OxaAi\Mcp\Tools\PluginsListTool;
 use OxaAi\Mcp\Tools\RewriteFlushTool;
 use OxaAi\Mcp\Tools\SetBrandTool;
+use OxaAi\Mcp\Tools\SiteCapabilitiesTool;
 use OxaAi\Mcp\Tools\SiteStatusTool;
 use OxaAi\Mcp\Tools\ThemeDirCreateTool;
 use OxaAi\Mcp\Tools\ThemeDirDeleteTool;
@@ -89,6 +90,7 @@ use OxaAi\Site\MediaService;
 use OxaAi\Site\GitRunner;
 use OxaAi\Site\PluginGit;
 use OxaAi\Site\PluginService;
+use OxaAi\Site\SiteCapabilities;
 use OxaAi\Site\SiteStatus;
 use OxaAi\Site\ThemeFs;
 use OxaAi\Site\ThemeGit;
@@ -209,6 +211,7 @@ final class Plugin
         $c->set(GitRunner::class,       static fn(Container $c): object => new GitRunner());
         $c->set(ThemeGit::class,        static fn(Container $c): object => new ThemeGit($c->get(Logger::class), $c->get(GitRunner::class)));
         $c->set(PluginGit::class,       static fn(Container $c): object => new PluginGit($c->get(GitRunner::class), $c->get(Logger::class)));
+        $c->set(SiteCapabilities::class, static fn(Container $c): object => new SiteCapabilities($c->get(GitRunner::class), $c->get(PluginService::class)));
         $c->set(Globals::class,         static fn(): object => new Globals());
         $c->set(Tokens::class,          static fn(): object => new Tokens());
         $c->set(SiteStatus::class,      static fn(): object => new SiteStatus());
@@ -301,6 +304,7 @@ final class Plugin
             $registry->add(new PluginGitStatusTool($c->get(PluginGit::class)));
             $registry->add(new PluginGitLogTool($c->get(PluginGit::class)));
             $registry->add(new PluginGitDiffTool($c->get(PluginGit::class)));
+            $registry->add(new SiteCapabilitiesTool($c->get(SiteCapabilities::class)));
 
             // 11. Cache & debugging.
             $registry->add(new CacheFlushTool());

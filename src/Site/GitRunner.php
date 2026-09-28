@@ -31,9 +31,9 @@ final class GitRunner
      *
      * @throws RuntimeException when git is unavailable or exits non-zero.
      */
-    public function run(string $cwd, array $args, array $env = []): array
+    public function run(string $cwd, array $args, array $env = [], int $timeout = 30): array
     {
-        $result = $this->tryRun($cwd, $args, $env);
+        $result = $this->tryRun($cwd, $args, $env, $timeout);
 
         if ($result['exit'] !== 0) {
             throw new RuntimeException(sprintf(
@@ -56,7 +56,7 @@ final class GitRunner
      * @param array<string,string> $env
      * @return array{stdout:string,stderr:string,exit:int}
      */
-    public function tryRun(string $cwd, array $args, array $env = []): array
+    public function tryRun(string $cwd, array $args, array $env = [], int $timeout = 30): array
     {
         if (!function_exists('proc_open')) {
             throw new RuntimeException('proc_open is disabled; git tools are unavailable.');
@@ -77,6 +77,8 @@ final class GitRunner
         $merged['GIT_TERMINAL_PROMPT'] = '0';
         $merged['GIT_ASKPASS'] = $merged['GIT_ASKPASS'] ?? 'echo';
         $merged['SSH_ASKPASS'] = $merged['SSH_ASKPASS'] ?? 'echo';
+        $merged['GIT_SSH_COMMAND'] = $merged['GIT_SSH_COMMAND']
+            ?? 'ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new';
 
         $proc = proc_open(array_merge(['git'], $args), $descriptors, $pipes, $cwd, $merged);
         if (!is_resource($proc)) {
@@ -84,11 +86,49 @@ final class GitRunner
         }
 
         fclose($pipes[0]);
-        $stdout = (string) stream_get_contents($pipes[1]);
-        $stderr = (string) stream_get_contents($pipes[2]);
+        stream_set_blocking($pipes[1], false);
+        stream_set_blocking($pipes[2], false);
+
+        $stdout = '';
+        $stderr = '';
+        $deadline = microtime(true) + max(1, $timeout);
+        $timedOut = false;
+
+        while (true) {
+            $stdout .= (string) stream_get_contents($pipes[1]);
+            $stderr .= (string) stream_get_contents($pipes[2]);
+
+            $status = proc_get_status($proc);
+            if (!$status['running']) {
+                break;
+            }
+
+            if (microtime(true) >= $deadline) {
+                $timedOut = true;
+                // SIGTERM first, then make sure it is gone.
+                proc_terminate($proc, 15);
+                usleep(200000);
+                if (proc_get_status($proc)['running']) {
+                    proc_terminate($proc, 9);
+                }
+                break;
+            }
+
+            usleep(20000);
+        }
+
+        // Drain whatever landed between the last read and exit.
+        $stdout .= (string) stream_get_contents($pipes[1]);
+        $stderr .= (string) stream_get_contents($pipes[2]);
+
         fclose($pipes[1]);
         fclose($pipes[2]);
         $exit = proc_close($proc);
+
+        if ($timedOut) {
+            $stderr = trim($stderr."\ngit timed out after {$timeout}s");
+            $exit = $exit === 0 ? 124 : $exit;
+        }
 
         return ['stdout' => $stdout, 'stderr' => $stderr, 'exit' => $exit];
     }
