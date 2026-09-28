@@ -142,7 +142,14 @@ final class GitRunner
 
         $binary = $this->resolveBinary();
 
-        $proc = proc_open(array_merge([$binary], $args), $descriptors, $pipes, $cwd, $merged);
+        // Bind-mounted working trees routinely belong to a different uid
+        // than the one PHP runs as (host files vs. a container user), and
+        // git >= 2.35.2 refuses those with "detected dubious ownership".
+        // Scope the exemption to the directory we were going to operate on
+        // anyway rather than relaxing anything globally.
+        $command = array_merge([$binary, '-c', 'safe.directory='.$cwd], $args);
+
+        $proc = proc_open($command, $descriptors, $pipes, $cwd, $merged);
         if (!is_resource($proc)) {
             throw new RuntimeException(sprintf('Failed to launch git (%s) in %s.', $binary, $cwd));
         }
