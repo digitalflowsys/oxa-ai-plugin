@@ -1,0 +1,106 @@
+name: build zip
+
+# Every push produces an installable zip. Pushing a v* tag additionally
+# publishes it as a release asset, which is the form you actually want for
+# installing onto a site: a stable URL that downloads the plugin zip
+# directly, rather than an artifact wrapped in another zip.
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-zip-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      zip: ${{ steps.meta.outputs.zip }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # A broken push must not produce a downloadable zip. The runner ships
+      # PHP, so this needs no third-party action.
+      - name: Lint every PHP file
+        run: |
+          php -v
+          find . -path ./.git -prune -o -name '*.php' -print0 \
+            | xargs -0 -P4 -n1 php -l
+
+      - name: Read plugin version from the header
+        id: meta
+        run: |
+          version=$(sed -n 's/^ \* Version:[[:space:]]*\(.*\)$/\1/p' oxa-ai.php | head -1 | tr -d '[:space:]')
+          if [ -z "$version" ]; then
+            echo "::error file=oxa-ai.php::Could not read the Version header"
+            exit 1
+          fi
+          # The constant and the header must agree, or WordPress and the
+          # hub will disagree about what is installed.
+          constant=$(sed -n "s/^define('OXA_AI_VERSION', '\(.*\)');$/\1/p" oxa-ai.php | head -1)
+          if [ "$version" != "$constant" ]; then
+            echo "::error file=oxa-ai.php::Version header ($version) and OXA_AI_VERSION ($constant) disagree"
+            exit 1
+          fi
+          echo "version=$version"                          >> "$GITHUB_OUTPUT"
+          echo "zip=oxa-ai-plugin-$version.zip"            >> "$GITHUB_OUTPUT"
+
+      # The prefix MUST be the directory the plugin installs into, or
+      # WordPress lands it in a differently-named folder and slug-based
+      # activation and tracking stop matching.
+      - name: Build the zip
+        run: |
+          mkdir -p dist
+          git archive --format=zip \
+            --prefix=oxa-ai-plugin/ \
+            -o "dist/${{ steps.meta.outputs.zip }}" \
+            HEAD
+
+      - name: Show what went in
+        run: |
+          unzip -l "dist/${{ steps.meta.outputs.zip }}" | tail -n 20
+          # Fail loudly if the entrypoint is missing — an empty or
+          # mis-prefixed archive is worse than no archive.
+          unzip -l "dist/${{ steps.meta.outputs.zip }}" \
+            | grep -q 'oxa-ai-plugin/oxa-ai.php' \
+            || { echo "::error::zip is missing oxa-ai-plugin/oxa-ai.php"; exit 1; }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: oxa-ai-plugin-${{ steps.meta.outputs.version }}-${{ github.sha }}
+          path: dist/*.zip
+          retention-days: 90
+          if-no-files-found: error
+
+  release:
+    # Only for v* tags. Pushing every commit to a release would bury the
+    # versions that matter.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: oxa-ai-plugin-${{ needs.build.outputs.version }}-${{ github.sha }}
+          path: dist
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            "dist/${{ needs.build.outputs.zip }}" \
+            --title "${{ github.ref_name }}" \
+            --generate-notes

@@ -1,0 +1,14 @@
+# Files that belong in the repository but not in an installable plugin.
+# `git archive` honours export-ignore, so the build workflow gets a clean
+# zip for free — no rsync/exclude list to keep in sync.
+/.github          export-ignore
+/.gitattributes   export-ignore
+/.gitignore       export-ignore
+/CONTRIBUTING.md  export-ignore
+/ROADMAP.md       export-ignore
+
+# Normalise line endings so zips built on any runner are identical.
+*.php  text eol=lf
+*.md   text eol=lf
+*.css  text eol=lf
+*.js   text eol=lf
