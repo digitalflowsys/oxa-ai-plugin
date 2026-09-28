@@ -68,7 +68,16 @@ final class SiteCapabilities
     private function gitBinary(): array
     {
         if (!function_exists('proc_open')) {
-            return ['available' => false, 'version' => null, 'error' => 'proc_open is disabled'];
+            return ['available' => false, 'binary' => null, 'version' => null, 'error' => 'proc_open is disabled'];
+        }
+
+        // Report the resolved path separately from the run: "no binary on
+        // this host" and "binary exists but would not execute" need
+        // different fixes, and conflating them cost a deploy cycle once.
+        try {
+            $binary = $this->git->resolveBinary();
+        } catch (\RuntimeException $e) {
+            return ['available' => false, 'binary' => null, 'version' => null, 'error' => $e->getMessage()];
         }
 
         $result = $this->git->tryRun(ABSPATH, ['--version'], [], 10);
@@ -76,13 +85,15 @@ final class SiteCapabilities
         if ($result['exit'] !== 0) {
             return [
                 'available' => false,
+                'binary'    => $binary,
                 'version'   => null,
-                'error'     => trim($result['stderr']) ?: 'git not found on PATH',
+                'error'     => trim($result['stderr']) ?: 'git found but would not execute',
             ];
         }
 
         return [
             'available' => true,
+            'binary'    => $binary,
             'version'   => trim($result['stdout']),
             'error'     => null,
         ];
