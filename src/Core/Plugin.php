@@ -58,6 +58,7 @@ use OxaAi\Mcp\Tools\ThemeDirListTool;
 use OxaAi\Mcp\Tools\ThemeFileDeleteTool;
 use OxaAi\Mcp\Tools\ThemeFileReadTool;
 use OxaAi\Mcp\Tools\ThemeFileWriteTool;
+use OxaAi\Mcp\Tools\PluginGitCheckoutTool;
 use OxaAi\Mcp\Tools\PluginGitDiffTool;
 use OxaAi\Mcp\Tools\PluginGitLogTool;
 use OxaAi\Mcp\Tools\PluginGitStatusTool;
@@ -304,6 +305,7 @@ final class Plugin
             $registry->add(new PluginGitStatusTool($c->get(PluginGit::class)));
             $registry->add(new PluginGitLogTool($c->get(PluginGit::class)));
             $registry->add(new PluginGitDiffTool($c->get(PluginGit::class)));
+            $registry->add(new PluginGitCheckoutTool($c->get(PluginGit::class)));
             $registry->add(new SiteCapabilitiesTool($c->get(SiteCapabilities::class)));
 
             // 11. Cache & debugging.

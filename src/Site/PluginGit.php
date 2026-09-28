@@ -7,7 +7,8 @@
  * what the hub shipped, which says nothing about edits made on the server
  * afterwards.
  *
- * Read-only by design. Nothing here writes to the working tree.
+ * status/log/diff are read-only. checkout() is the one mutating call,
+ * and it refuses to run over uncommitted work unless explicitly forced.
  *
  * @package OxaAi
  */
@@ -177,6 +178,91 @@ final class PluginGit
             'diff'      => $diff,
             'paths'     => $names,
             'truncated' => $truncated,
+        ];
+    }
+
+    /**
+     * Move a plugin's working tree to a specific commit.
+     *
+     * Used to resolve drift by restoring the commit the hub recorded. This
+     * is the only call here that writes, so it is deliberately strict:
+     *
+     *  - a tree with uncommitted changes is refused unless $force, because
+     *    those edits exist nowhere else and a checkout would discard them
+     *  - the ref must already be present locally, or be fetchable; we never
+     *    silently end up on a different commit than asked for
+     *  - the result reports the resulting HEAD so the caller can verify
+     *    rather than assume
+     *
+     * @return array{ok:bool,slug:string,previous_head:string,head:string,detached:bool,forced:bool}
+     */
+    public function checkout(string $slug, string $ref, bool $force = false): array
+    {
+        $dir = PluginPaths::dir($slug);
+
+        if (!PluginPaths::isRepo($dir)) {
+            throw new RuntimeException(sprintf('%s is not a git working tree; nothing to check out.', $slug));
+        }
+
+        // Anything git would accept as a rev, without shell metacharacters.
+        if (!preg_match('/^[A-Za-z0-9._\/-]{1,255}$/', $ref) || str_contains($ref, '..')) {
+            throw new RuntimeException('Invalid ref.');
+        }
+
+        $previous = trim($this->git->run($dir, ['rev-parse', 'HEAD'])['stdout']);
+
+        $porcelain = trim($this->git->run($dir, ['status', '--porcelain=v1'])['stdout']);
+        if ($porcelain !== '' && !$force) {
+            $count = count(array_filter(preg_split('/\R/', $porcelain) ?: []));
+            throw new RuntimeException(sprintf(
+                '%s has %d uncommitted change(s). Those edits exist only on this server and a checkout would discard them. Commit or stash them first, or pass force=true to discard them deliberately.',
+                $slug,
+                $count
+            ));
+        }
+
+        // Fetch only when the ref is not already known, so a restore to an
+        // older commit keeps working on hosts with no GitHub credentials.
+        if ($this->git->tryRun($dir, ['rev-parse', '--verify', '--quiet', $ref.'^{commit}'])['exit'] !== 0) {
+            $fetch = $this->git->tryRun($dir, ['fetch', '--tags', 'origin'], [], 60);
+            if ($fetch['exit'] !== 0) {
+                throw new RuntimeException(sprintf(
+                    'Ref %s is not present locally and fetching from origin failed: %s',
+                    $ref,
+                    trim($fetch['stderr']) ?: 'unknown error'
+                ));
+            }
+            if ($this->git->tryRun($dir, ['rev-parse', '--verify', '--quiet', $ref.'^{commit}'])['exit'] !== 0) {
+                throw new RuntimeException(sprintf('Ref %s does not exist in this repository.', $ref));
+            }
+        }
+
+        $args = ['checkout'];
+        if ($force) {
+            $args[] = '--force';
+        }
+        // Detach deliberately: restoring to a recorded commit pins the site
+        // to that commit, and pretending it is "on a branch" would misreport
+        // the state at the next status check.
+        $args[] = '--detach';
+        $args[] = $ref;
+
+        $this->git->run($dir, $args, [], 60);
+
+        $head = trim($this->git->run($dir, ['rev-parse', 'HEAD'])['stdout']);
+        $branch = trim($this->git->run($dir, ['rev-parse', '--abbrev-ref', 'HEAD'])['stdout']);
+
+        $this->logger->info('plugin git checkout', [
+            'slug' => $slug, 'from' => $previous, 'to' => $head, 'forced' => $force,
+        ]);
+
+        return [
+            'ok'            => true,
+            'slug'          => $slug,
+            'previous_head' => $previous,
+            'head'          => $head,
+            'detached'      => $branch === 'HEAD',
+            'forced'        => $force,
         ];
     }
 
