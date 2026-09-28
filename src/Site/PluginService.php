@@ -271,4 +271,41 @@ final class PluginService
 
         return $version === '' ? null : $version;
     }
+
+    // ---- helpers shared with the git install path -------------------
+    //
+    // plugin_git_install writes files itself rather than going through
+    // Plugin_Upgrader, so it needs the same post-install steps the zip
+    // path gets for free: find the entry file, read its version, activate
+    // it. Public wrappers over the existing private logic — deliberately
+    // not reimplementations, so both paths stay in step.
+
+    /**
+     * Entry file for an installed plugin ("slug/slug.php"), or null when
+     * the directory holds no recognisable plugin.
+     */
+    public function resolveInstalledFile(string $slug): ?string
+    {
+        // A directory written outside the upgrader is not in the cache yet.
+        if (function_exists('wp_clean_plugins_cache')) {
+            wp_clean_plugins_cache(false);
+        }
+
+        try {
+            return $this->resolveFile($slug);
+        } catch (RuntimeException) {
+            return null;
+        }
+    }
+
+    public function versionForInstalledFile(string $file): ?string
+    {
+        return $this->versionForFile($file);
+    }
+
+    public function activateInstalledFile(string $file): void
+    {
+        $this->loadAdminIncludes();
+        $this->activateFile($file);
+    }
 }

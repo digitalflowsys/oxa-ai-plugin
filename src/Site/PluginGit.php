@@ -267,6 +267,211 @@ final class PluginGit
     }
 
     /**
+     * Install or update a plugin as a git working tree.
+     *
+     * Replaces the zip path for git-capable hosts. The upgrader deletes the
+     * plugin directory wholesale, so installing over a git-backed plugin
+     * would destroy the history that makes drift detectable — the exact
+     * trap that made converting a site to git leave it MORE fragile than
+     * leaving it as an archive.
+     *
+     * Three situations, resolved here rather than by the caller guessing:
+     *
+     *   clone    nothing on disk — a fresh git install at $ref
+     *   update   already a working tree — fetch and check out $ref
+     *   adopt    files present but untracked (an old zip install) — wrap
+     *            them in a repo WITHOUT touching file contents, so any
+     *            local modifications survive and surface as drift
+     *
+     * A credential is used for this call only: it is passed to git through
+     * the environment, never written into .git/config or the remote URL,
+     * so nothing durable is left on the site.
+     *
+     * @return array{ok:bool,slug:string,mode:string,head:string,previous_head:?string,detached:bool,dirty_files:int,dir:string}
+     */
+    public function deploy(
+        string $slug,
+        string $repoUrl,
+        string $ref,
+        ?string $token = null,
+        bool $adoptExisting = true,
+    ): array {
+        if (!preg_match('#^https://[A-Za-z0-9._\-/]+$#', $repoUrl) && !preg_match('#^git@[A-Za-z0-9._\-]+:[A-Za-z0-9._\-/]+$#', $repoUrl)) {
+            throw new RuntimeException('Invalid repository URL.');
+        }
+        if (!preg_match('/^[A-Za-z0-9._\/-]{1,255}$/', $ref) || str_contains($ref, '..')) {
+            throw new RuntimeException('Invalid ref.');
+        }
+
+        $dir = PluginPaths::targetDir($slug);
+        $env = $this->credentialEnv($token);
+
+        if (!is_dir($dir)) {
+            return $this->cloneFresh($slug, $dir, $repoUrl, $ref, $env);
+        }
+
+        if (PluginPaths::isRepo($dir)) {
+            return $this->updateExisting($slug, $dir, $ref, $env);
+        }
+
+        if (!$adoptExisting) {
+            throw new RuntimeException(sprintf(
+                '%s already exists but is not a git working tree. Pass adopt_existing=true to convert it in place, or uninstall it first.',
+                $slug
+            ));
+        }
+
+        return $this->adoptExisting($slug, $dir, $repoUrl, $ref, $env);
+    }
+
+    /** @param array<string,string> $env */
+    private function cloneFresh(string $slug, string $dir, string $repoUrl, string $ref, array $env): array
+    {
+        $parent = dirname($dir);
+        if (!is_writable($parent)) {
+            throw new RuntimeException(sprintf('Plugins directory is not writable: %s', $parent));
+        }
+
+        // Clone the clean URL: any credential travels via $env, so nothing
+        // secret is persisted into .git/config by the clone itself.
+        $this->git->run($parent, ['clone', '--no-checkout', $repoUrl, $slug], $env, 300);
+        $this->checkoutRef($dir, $ref, $env, force: true);
+
+        $head = trim($this->git->run($dir, ['rev-parse', 'HEAD'])['stdout']);
+        $this->logger->info('plugin git clone', ['slug' => $slug, 'ref' => $ref, 'head' => $head]);
+
+        return $this->result($slug, 'clone', $dir, $head, null, 0);
+    }
+
+    /** @param array<string,string> $env */
+    private function updateExisting(string $slug, string $dir, string $ref, array $env): array
+    {
+        $previous = trim($this->git->run($dir, ['rev-parse', 'HEAD'])['stdout']);
+
+        $porcelain = trim($this->git->run($dir, ['status', '--porcelain=v1'])['stdout']);
+        $dirty = count(array_filter(preg_split('/\R/', $porcelain) ?: []));
+        if ($dirty > 0) {
+            throw new RuntimeException(sprintf(
+                '%s has %d uncommitted change(s) on this server. Updating would discard them. Commit or stash them first.',
+                $slug,
+                $dirty
+            ));
+        }
+
+        $this->git->run($dir, ['fetch', '--tags', 'origin'], $env, 120);
+        $this->checkoutRef($dir, $ref, $env, force: false);
+
+        $head = trim($this->git->run($dir, ['rev-parse', 'HEAD'])['stdout']);
+        $this->logger->info('plugin git update', ['slug' => $slug, 'from' => $previous, 'to' => $head]);
+
+        return $this->result($slug, 'update', $dir, $head, $previous, 0);
+    }
+
+    /**
+     * Wrap an existing untracked directory in a repo without rewriting a
+     * single file: init, fetch, then reset --mixed. The working tree is
+     * left exactly as found, so anything edited on the server survives and
+     * shows up as drift instead of being silently overwritten.
+     *
+     * @param array<string,string> $env
+     */
+    private function adoptExisting(string $slug, string $dir, string $repoUrl, string $ref, array $env): array
+    {
+        if (!is_writable($dir)) {
+            throw new RuntimeException(sprintf('%s is not writable.', $dir));
+        }
+
+        $this->git->run($dir, ['init', '-q']);
+        if ($this->git->tryRun($dir, ['remote', 'get-url', 'origin'])['exit'] !== 0) {
+            $this->git->run($dir, ['remote', 'add', 'origin', $repoUrl]);
+        }
+        $this->git->run($dir, ['fetch', '--tags', 'origin'], $env, 300);
+
+        $target = $this->resolveRef($dir, $ref);
+        // --mixed: moves HEAD and the index, never the working tree.
+        $this->git->run($dir, ['reset', '--mixed', $target]);
+
+        $porcelain = trim($this->git->run($dir, ['status', '--porcelain=v1'])['stdout']);
+        $dirty = count(array_filter(preg_split('/\R/', $porcelain) ?: []));
+
+        $head = trim($this->git->run($dir, ['rev-parse', 'HEAD'])['stdout']);
+        $this->logger->info('plugin git adopt', ['slug' => $slug, 'head' => $head, 'dirty_files' => $dirty]);
+
+        return $this->result($slug, 'adopt', $dir, $head, null, $dirty);
+    }
+
+    /** @param array<string,string> $env */
+    private function checkoutRef(string $dir, string $ref, array $env, bool $force): void
+    {
+        $target = $this->resolveRef($dir, $ref);
+        $args = ['checkout'];
+        if ($force) {
+            $args[] = '--force';
+        }
+        $args[] = '--detach';
+        $args[] = $target;
+        $this->git->run($dir, $args, $env, 120);
+    }
+
+    /**
+     * Turn a caller-supplied ref into something checkoutable, preferring the
+     * remote-tracking copy so "main" means origin's main rather than a stale
+     * local branch.
+     */
+    private function resolveRef(string $dir, string $ref): string
+    {
+        foreach (['refs/remotes/origin/'.$ref, $ref] as $candidate) {
+            if ($this->git->tryRun($dir, ['rev-parse', '--verify', '--quiet', $candidate.'^{commit}'])['exit'] === 0) {
+                return $candidate;
+            }
+        }
+
+        throw new RuntimeException(sprintf('Ref %s does not exist in this repository.', $ref));
+    }
+
+    /**
+     * Credential plumbing for one invocation.
+     *
+     * The token goes in the environment and is read by an inline credential
+     * helper, so it never reaches argv (visible in ps) nor .git/config
+     * (persisted on disk). The helper string itself holds no secret.
+     *
+     * @return array<string,string>
+     */
+    private function credentialEnv(?string $token): array
+    {
+        if ($token === null || $token === '') {
+            return [];
+        }
+
+        return [
+            'OXA_GIT_TOKEN' => $token,
+            'GIT_CONFIG_COUNT' => '1',
+            'GIT_CONFIG_KEY_0' => 'credential.helper',
+            'GIT_CONFIG_VALUE_0' => '!f() { echo username=x-access-token; echo password=$OXA_GIT_TOKEN; }; f',
+        ];
+    }
+
+    /**
+     * @return array{ok:bool,slug:string,mode:string,head:string,previous_head:?string,detached:bool,dirty_files:int,dir:string}
+     */
+    private function result(string $slug, string $mode, string $dir, string $head, ?string $previous, int $dirty): array
+    {
+        $branch = trim($this->git->run($dir, ['rev-parse', '--abbrev-ref', 'HEAD'])['stdout']);
+
+        return [
+            'ok' => true,
+            'slug' => $slug,
+            'mode' => $mode,
+            'head' => $head,
+            'previous_head' => $previous,
+            'detached' => $branch === 'HEAD',
+            'dirty_files' => $dirty,
+            'dir' => $dir,
+        ];
+    }
+
+    /**
      * @return array{ok:bool,slug:string,is_repo:bool,head:null,head_short:null,branch:null,detached:bool,clean:null,dirty_files:int,porcelain:string,upstream:null,ahead:null,behind:null,remote:null,committed_at:null}
      */
     private function untracked(string $slug): array

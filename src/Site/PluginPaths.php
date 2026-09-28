@@ -79,4 +79,28 @@ final class PluginPaths
         return is_dir($dir . DIRECTORY_SEPARATOR . '.git')
             || is_file($dir . DIRECTORY_SEPARATOR . '.git');
     }
+
+    /**
+     * Where a plugin slug WOULD live, without requiring it to exist yet.
+     *
+     * dir() deliberately refuses missing directories; cloning needs the
+     * target path before anything is there. Validation and containment are
+     * identical — only the existence check differs.
+     */
+    public static function targetDir(string $slug): string
+    {
+        if ($slug === '' || str_contains($slug, "\0") || !preg_match(self::SLUG_PATTERN, $slug)) {
+            throw new RuntimeException(sprintf('Invalid plugin slug: %s', $slug));
+        }
+        if ($slug === '.' || $slug === '..') {
+            throw new RuntimeException('Invalid plugin slug.');
+        }
+
+        $base = realpath(self::root());
+        if ($base === false) {
+            throw new RuntimeException('Plugins directory could not be resolved.');
+        }
+
+        return rtrim($base, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . $slug;
+    }
 }
