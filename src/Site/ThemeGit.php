@@ -21,10 +21,13 @@ if (!defined('ABSPATH')) {
 
 final class ThemeGit
 {
-    private const COMMIT_AUTHOR_NAME  = 'Oxa AI';
-    private const COMMIT_AUTHOR_EMAIL = 'oxa-ai@local';
+    private const COMMIT_AUTHOR_NAME  = GitRunner::COMMIT_AUTHOR_NAME;
+    private const COMMIT_AUTHOR_EMAIL = GitRunner::COMMIT_AUTHOR_EMAIL;
 
-    public function __construct(private readonly Logger $logger) {}
+    public function __construct(
+        private readonly Logger $logger,
+        private readonly GitRunner $git,
+    ) {}
 
     /**
      * @return array{ok:bool,is_repo:bool,branch:?string,porcelain:string,clean:bool}
@@ -184,33 +187,6 @@ final class ThemeGit
      */
     private function run(string $cwd, array $args, array $env = []): array
     {
-        if (!function_exists('proc_open')) {
-            throw new RuntimeException('proc_open is disabled; git tools are unavailable.');
-        }
-        $cmd = array_merge(['git'], $args);
-        $descriptors = [
-            0 => ['pipe', 'r'],
-            1 => ['pipe', 'w'],
-            2 => ['pipe', 'w'],
-        ];
-        $merged = array_merge($_ENV ?: [], $env);
-        // Force C locale for stable parsing.
-        $merged['LC_ALL'] = 'C';
-
-        $proc = proc_open($cmd, $descriptors, $pipes, $cwd, $merged);
-        if (!is_resource($proc)) {
-            throw new RuntimeException('Failed to launch git.');
-        }
-        fclose($pipes[0]);
-        $stdout = (string) stream_get_contents($pipes[1]);
-        $stderr = (string) stream_get_contents($pipes[2]);
-        fclose($pipes[1]);
-        fclose($pipes[2]);
-        $exit = proc_close($proc);
-
-        if ($exit !== 0) {
-            throw new RuntimeException(sprintf("git %s failed (exit %d):\n%s", implode(' ', $args), $exit, trim($stderr) ?: trim($stdout)));
-        }
-        return ['stdout' => $stdout, 'stderr' => $stderr, 'exit' => $exit];
+        return $this->git->run($cwd, $args, $env);
     }
 }

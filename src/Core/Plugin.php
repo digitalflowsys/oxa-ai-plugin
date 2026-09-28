@@ -57,6 +57,9 @@ use OxaAi\Mcp\Tools\ThemeDirListTool;
 use OxaAi\Mcp\Tools\ThemeFileDeleteTool;
 use OxaAi\Mcp\Tools\ThemeFileReadTool;
 use OxaAi\Mcp\Tools\ThemeFileWriteTool;
+use OxaAi\Mcp\Tools\PluginGitDiffTool;
+use OxaAi\Mcp\Tools\PluginGitLogTool;
+use OxaAi\Mcp\Tools\PluginGitStatusTool;
 use OxaAi\Mcp\Tools\ThemeGitCommitTool;
 use OxaAi\Mcp\Tools\ThemeGitDiffTool;
 use OxaAi\Mcp\Tools\ThemeGitLogTool;
@@ -83,6 +86,8 @@ use OxaAi\Site\BlockScaffolder;
 use OxaAi\Site\DbGate;
 use OxaAi\Site\Globals;
 use OxaAi\Site\MediaService;
+use OxaAi\Site\GitRunner;
+use OxaAi\Site\PluginGit;
 use OxaAi\Site\PluginService;
 use OxaAi\Site\SiteStatus;
 use OxaAi\Site\ThemeFs;
@@ -201,7 +206,9 @@ final class Plugin
 
         // -------- Site services (filesystem, git, globals, media, plugins, db, wp-cli) --------
         $c->set(ThemeFs::class,         static fn(Container $c): object => new ThemeFs($c->get(Logger::class)));
-        $c->set(ThemeGit::class,        static fn(Container $c): object => new ThemeGit($c->get(Logger::class)));
+        $c->set(GitRunner::class,       static fn(Container $c): object => new GitRunner());
+        $c->set(ThemeGit::class,        static fn(Container $c): object => new ThemeGit($c->get(Logger::class), $c->get(GitRunner::class)));
+        $c->set(PluginGit::class,       static fn(Container $c): object => new PluginGit($c->get(GitRunner::class), $c->get(Logger::class)));
         $c->set(Globals::class,         static fn(): object => new Globals());
         $c->set(Tokens::class,          static fn(): object => new Tokens());
         $c->set(SiteStatus::class,      static fn(): object => new SiteStatus());
@@ -287,6 +294,13 @@ final class Plugin
             $registry->add(new PluginInstallTool($c->get(PluginService::class)));
             $registry->add(new PluginInstallFromUrlTool($c->get(PluginService::class)));
             $registry->add(new PluginUninstallTool($c->get(PluginService::class)));
+
+            // Read-only git state for installed plugins. This is how the hub
+            // learns what a site is actually running, as opposed to what it
+            // was last told to install.
+            $registry->add(new PluginGitStatusTool($c->get(PluginGit::class)));
+            $registry->add(new PluginGitLogTool($c->get(PluginGit::class)));
+            $registry->add(new PluginGitDiffTool($c->get(PluginGit::class)));
 
             // 11. Cache & debugging.
             $registry->add(new CacheFlushTool());

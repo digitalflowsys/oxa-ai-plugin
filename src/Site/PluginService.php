@@ -99,8 +99,9 @@ final class PluginService
         if ($activate) {
             $this->activate($slug);
         }
-        $this->logger->info('plugin installed from repo', ['slug' => $slug, 'file' => $file]);
-        return ['slug' => $slug, 'file' => $file, 'active' => $activate, 'source' => 'wp.org'];
+        $version = $this->versionForFile($file);
+        $this->logger->info('plugin installed from repo', ['slug' => $slug, 'file' => $file, 'version' => $version]);
+        return ['slug' => $slug, 'file' => $file, 'active' => $activate, 'source' => 'wp.org', 'version' => $version];
     }
 
     public function installFromUrl(string $url, ?string $slug = null, bool $activate = true, bool $overwrite = true): array
@@ -154,8 +155,9 @@ final class PluginService
         }
 
         $resolvedSlug = dirname($file) !== '.' ? dirname($file) : basename($file, '.php');
-        $this->logger->info('plugin installed from url', ['url' => $url, 'file' => $file]);
-        return ['slug' => $resolvedSlug, 'file' => $file, 'active' => $activate, 'source' => $url];
+        $version = $this->versionForFile($file);
+        $this->logger->info('plugin installed from url', ['url' => $url, 'file' => $file, 'version' => $version]);
+        return ['slug' => $resolvedSlug, 'file' => $file, 'active' => $activate, 'source' => $url, 'version' => $version];
     }
 
     public function uninstall(string $slug, bool $deactivateIfActive = true): array
@@ -242,5 +244,31 @@ final class PluginService
             }
         }
         throw new RuntimeException(sprintf('Plugin "%s" is not installed.', $slug));
+    }
+
+    /**
+     * Header version of a just-installed plugin file, e.g. "1.1.0".
+     *
+     * The hub records this as plugin_installations.installed_version. Both
+     * install paths previously returned no version at all, so that column
+     * was never populated — the dashboard could only ever show the SHA the
+     * hub *believed* it had shipped.
+     */
+    private function versionForFile(string $file): ?string
+    {
+        if (!function_exists('get_plugin_data')) {
+            require_once ABSPATH . 'wp-admin/includes/plugin.php';
+        }
+
+        $abs = trailingslashit(defined('WP_PLUGIN_DIR') ? WP_PLUGIN_DIR : WP_CONTENT_DIR . '/plugins') . $file;
+        if (!is_file($abs)) {
+            return null;
+        }
+
+        // markup=false, translate=false — we want the raw header value.
+        $data = get_plugin_data($abs, false, false);
+        $version = is_string($data['Version'] ?? null) ? trim($data['Version']) : '';
+
+        return $version === '' ? null : $version;
     }
 }
