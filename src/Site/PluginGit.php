@@ -287,7 +287,7 @@ final class PluginGit
      * the environment, never written into .git/config or the remote URL,
      * so nothing durable is left on the site.
      *
-     * @return array{ok:bool,slug:string,mode:string,head:string,previous_head:?string,detached:bool,dirty_files:int,dir:string}
+     * @return array{ok:bool,slug:string,mode:string,head:string,previous_head:?string,detached:bool,branch:?string,dirty_files:int,dir:string}
      */
     public function deploy(
         string $slug,
@@ -335,7 +335,7 @@ final class PluginGit
         // Clone the clean URL: any credential travels via $env, so nothing
         // secret is persisted into .git/config by the clone itself.
         $this->git->run($parent, ['clone', '--no-checkout', $repoUrl, $slug], $env, 300);
-        $this->checkoutRef($dir, $ref, $env, force: true);
+        $this->placeHead($dir, $ref, $env, force: true);
 
         $head = trim($this->git->run($dir, ['rev-parse', 'HEAD'])['stdout']);
         $this->logger->info('plugin git clone', ['slug' => $slug, 'ref' => $ref, 'head' => $head]);
@@ -359,7 +359,7 @@ final class PluginGit
         }
 
         $this->git->run($dir, ['fetch', '--tags', 'origin'], $env, 120);
-        $this->checkoutRef($dir, $ref, $env, force: false);
+        $this->placeHead($dir, $ref, $env, force: false);
 
         $head = trim($this->git->run($dir, ['rev-parse', 'HEAD'])['stdout']);
         $this->logger->info('plugin git update', ['slug' => $slug, 'from' => $previous, 'to' => $head]);
@@ -388,8 +388,21 @@ final class PluginGit
         $this->git->run($dir, ['fetch', '--tags', 'origin'], $env, 300);
 
         $target = $this->resolveRef($dir, $ref);
+        if ($this->isRemoteBranch($dir, $ref)) {
+            // `git init` left HEAD on an unborn branch named after the
+            // host's init.defaultBranch (usually "master"). Rename it to
+            // the branch being deployed before anything is committed to it.
+            $this->git->run($dir, ['symbolic-ref', 'HEAD', 'refs/heads/' . $ref]);
+        } else {
+            // A tag or commit: sit detached on it rather than inventing a branch.
+            $sha = trim($this->git->run($dir, ['rev-parse', $target . '^{commit}'])['stdout']);
+            $this->git->run($dir, ['update-ref', '--no-deref', 'HEAD', $sha]);
+        }
         // --mixed: moves HEAD and the index, never the working tree.
         $this->git->run($dir, ['reset', '--mixed', $target]);
+        if ($this->isRemoteBranch($dir, $ref)) {
+            $this->git->run($dir, ['branch', '--set-upstream-to=origin/' . $ref, $ref]);
+        }
 
         $porcelain = trim($this->git->run($dir, ['status', '--porcelain=v1'])['stdout']);
         $dirty = count(array_filter(preg_split('/\R/', $porcelain) ?: []));
@@ -411,6 +424,79 @@ final class PluginGit
         $args[] = '--detach';
         $args[] = $target;
         $this->git->run($dir, $args, $env, 120);
+    }
+
+    /**
+     * Put HEAD on $ref for a deploy.
+     *
+     * A branch is checked out as a local branch of the same name tracking
+     * origin/<branch> — so the server shows `main`, and `git pull` / `git
+     * push` work for anyone editing there. Tags and commits stay detached.
+     *
+     * An existing local branch is only ever fast-forwarded: if it holds
+     * commits origin does not have, the deploy refuses rather than hiding
+     * them. A leftover branch from an older adopt (e.g. "master" created by
+     * `git init`) is removed once nothing on it would be lost.
+     *
+     * @param array<string,string> $env
+     */
+    private function placeHead(string $dir, string $ref, array $env, bool $force): void
+    {
+        if (!$this->isRemoteBranch($dir, $ref)) {
+            $this->checkoutRef($dir, $ref, $env, $force);
+            return;
+        }
+
+        $remote = 'origin/' . $ref;
+        $local = 'refs/heads/' . $ref;
+
+        if ($this->git->tryRun($dir, ['rev-parse', '--verify', '--quiet', $local])['exit'] === 0
+            && $this->git->tryRun($dir, ['merge-base', '--is-ancestor', $local, 'refs/remotes/' . $remote])['exit'] !== 0) {
+            $ahead = trim($this->git->run($dir, ['rev-list', '--count', 'refs/remotes/' . $remote . '..' . $local])['stdout']);
+            throw new RuntimeException(sprintf(
+                'Local branch %s on this server has %s commit(s) that are not on %s. Deploying would hide them. Push them (git push origin %s) or move them to another branch, then retry.',
+                $ref,
+                $ahead,
+                $remote,
+                $ref
+            ));
+        }
+
+        $previousBranch = trim($this->git->tryRun($dir, ['symbolic-ref', '--quiet', '--short', 'HEAD'])['stdout']);
+
+        $args = ['checkout'];
+        if ($force) {
+            $args[] = '--force';
+        }
+        array_push($args, '-B', $ref, '--track', $remote);
+        $this->git->run($dir, $args, $env, 120);
+
+        $this->dropOrphanBranch($dir, $previousBranch, $ref);
+    }
+
+    /**
+     * Delete a branch that only existed because of how the directory was
+     * first adopted: no upstream, and fully contained in the new HEAD.
+     */
+    private function dropOrphanBranch(string $dir, string $branch, string $current): void
+    {
+        if ($branch === '' || $branch === $current) {
+            return;
+        }
+        if ($this->git->tryRun($dir, ['rev-parse', '--abbrev-ref', $branch . '@{upstream}'])['exit'] === 0) {
+            return; // tracks something: a real branch, leave it alone
+        }
+        if ($this->git->tryRun($dir, ['merge-base', '--is-ancestor', 'refs/heads/' . $branch, 'HEAD'])['exit'] !== 0) {
+            return; // has commits HEAD lacks: never delete work
+        }
+
+        $this->git->tryRun($dir, ['branch', '-D', $branch]);
+        $this->logger->info('plugin git dropped orphan branch', ['dir' => $dir, 'branch' => $branch]);
+    }
+
+    private function isRemoteBranch(string $dir, string $ref): bool
+    {
+        return $this->git->tryRun($dir, ['rev-parse', '--verify', '--quiet', 'refs/remotes/origin/' . $ref . '^{commit}'])['exit'] === 0;
     }
 
     /**
@@ -453,7 +539,7 @@ final class PluginGit
     }
 
     /**
-     * @return array{ok:bool,slug:string,mode:string,head:string,previous_head:?string,detached:bool,dirty_files:int,dir:string}
+     * @return array{ok:bool,slug:string,mode:string,head:string,previous_head:?string,detached:bool,branch:?string,dirty_files:int,dir:string}
      */
     private function result(string $slug, string $mode, string $dir, string $head, ?string $previous, int $dirty): array
     {
@@ -466,6 +552,7 @@ final class PluginGit
             'head' => $head,
             'previous_head' => $previous,
             'detached' => $branch === 'HEAD',
+            'branch' => $branch === 'HEAD' ? null : $branch,
             'dirty_files' => $dirty,
             'dir' => $dir,
         ];
